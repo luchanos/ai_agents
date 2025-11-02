@@ -1,0 +1,7 @@
+aiogram==3.22.0
+python-dotenv==1.1.1
+openai
+google-auth
+google-auth-oauthlib
+google-auth-httplib2
+google-api-python-client
