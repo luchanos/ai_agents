@@ -63,12 +63,12 @@ class EventStorage(ABC):
     """Abstract interface for event storage operations."""
     
     @abstractmethod
-    async def create_event(self, title: str, date: str, time: str, description: str) -> Dict[str, Any]:
+    async def create_event(self, title: str, date: str, time: str, description: str, duration_hours: float = 1.0) -> Dict[str, Any]:
         """Create a new event."""
         pass
     
     @abstractmethod
-    async def list_events(self) -> List[Dict[str, Any]]:
+    async def list_events(self, max_results: Optional[int] = None) -> List[Dict[str, Any]]:
         """List all events."""
         pass
     
@@ -121,7 +121,7 @@ class JSONFileEventStorage(EventStorage):
             return 1
         return max(int(e.get("id", 0)) for e in events) + 1
     
-    async def create_event(self, title: str, date: str, time: str, description: str) -> Dict[str, Any]:
+    async def create_event(self, title: str, date: str, time: str, description: str, duration_hours: float = 1.0) -> Dict[str, Any]:
         """Create a new event in JSON file."""
         data = await self._read_json_file()
         events: List[Dict[str, Any]] = data.get("events", [])
@@ -138,10 +138,13 @@ class JSONFileEventStorage(EventStorage):
         await self._write_json_file(data)
         return event
     
-    async def list_events(self) -> List[Dict[str, Any]]:
+    async def list_events(self, max_results: Optional[int] = None) -> List[Dict[str, Any]]:
         """List all events from JSON file."""
         data = await self._read_json_file()
-        return list(data.get("events", []))
+        events = list(data.get("events", []))
+        if max_results is not None:
+            return events[: int(max_results)]
+        return events
     
     async def get_event(self, event_id: Any) -> Dict[str, Any]:
         """Get an event by ID from JSON file."""
@@ -280,7 +283,7 @@ class GoogleCalendarEventStorage(EventStorage):
         
         return await asyncio.to_thread(_create)
     
-    async def list_events(self, max_results: int = 10) -> List[Dict[str, Any]]:
+    async def list_events(self, max_results: Optional[int] = None) -> List[Dict[str, Any]]:
         """List upcoming events from Google Calendar."""
         service = self._get_service()
         
@@ -289,7 +292,7 @@ class GoogleCalendarEventStorage(EventStorage):
             events_result = service.events().list(
                 calendarId='primary',
                 timeMin=now,
-                maxResults=max_results,
+                maxResults=(max_results or 10),
                 singleEvents=True,
                 orderBy='startTime'
             ).execute()
@@ -444,38 +447,7 @@ STORAGE_MAP = {
     "google_calendar": calendar_storage,
 }
 
-# -------------------------
-# Unified CRUD Functions (work with any EventStorage)
-# -------------------------
-async def create_event_unified(storage: EventStorage, title: str, date: str, time: str, 
-                                description: str, **kwargs) -> Dict[str, Any]:
-    """Create event using specified storage."""
-    if isinstance(storage, GoogleCalendarEventStorage):
-        duration_hours = kwargs.get("duration_hours", 1.0)
-        return await storage.create_event(title, date, time, description, duration_hours)
-    else:
-        return await storage.create_event(title, date, time, description)
-
-async def update_event_unified(storage: EventStorage, event_id: Any, 
-                               updates: Dict[str, str]) -> Dict[str, Any]:
-    """Update event using specified storage."""
-    return await storage.update_event(event_id, updates)
-
-async def delete_event_unified(storage: EventStorage, event_id: Any) -> bool:
-    """Delete event using specified storage."""
-    return await storage.delete_event(event_id)
-
-async def get_event_unified(storage: EventStorage, event_id: Any) -> Dict[str, Any]:
-    """Get event using specified storage."""
-    return await storage.get_event(event_id)
-
-async def list_events_unified(storage: EventStorage, **kwargs) -> List[Dict[str, Any]]:
-    """List events using specified storage."""
-    if isinstance(storage, GoogleCalendarEventStorage):
-        max_results = kwargs.get("max_results", 10)
-        return await storage.list_events(max_results)
-    else:
-        return await storage.list_events()
+# (Removed unified CRUD wrappers; we call storage methods directly.)
 
 def get_storage_by_type(storage_type: str) -> EventStorage:
     """Get storage instance by type name."""
@@ -627,13 +599,17 @@ async def call_openai_with_tools(messages: List[ChatMessage], max_iterations: in
                     if not storage:
                         result = {"error": "storage_type is required"}
                     else:
-                        result = await create_event_unified(
-                            storage=storage,
-                            title=args.get("title", ""),
-                            date=args.get("date", ""),
-                            time=args.get("time", ""),
-                            description=args.get("description", ""),
-                            duration_hours=args.get("duration_hours", 1.0),
+                        title = args.get("title", "")
+                        date = args.get("date", "")
+                        time = args.get("time", "")
+                        description = args.get("description", "")
+                        duration_hours = args.get("duration_hours", 1.0)
+                        result = await storage.create_event(
+                            title=title,
+                            date=date,
+                            time=time,
+                            description=description,
+                            duration_hours=duration_hours,
                         )
                 elif name == "update_event":
                     if not storage:
@@ -653,7 +629,7 @@ async def call_openai_with_tools(messages: List[ChatMessage], max_iterations: in
                         else:
                             # Ensure event_id is string for Google Calendar
                             event_id = str(event_id)
-                        result = await update_event_unified(storage, event_id, updates)
+                        result = await storage.update_event(event_id, updates)
                 elif name == "delete_event":
                     if not storage:
                         result = {"error": "storage_type is required"}
@@ -662,7 +638,7 @@ async def call_openai_with_tools(messages: List[ChatMessage], max_iterations: in
                         # Convert event_id based on storage type
                         if storage_type.lower() in ["json"]:
                             event_id = int(event_id)
-                        await delete_event_unified(storage, event_id)
+                        await storage.delete_event(event_id)
                         result = {"ok": True}
                 elif name == "get_event":
                     if not storage:
@@ -672,14 +648,13 @@ async def call_openai_with_tools(messages: List[ChatMessage], max_iterations: in
                         # Convert event_id based on storage type
                         if storage_type.lower() in ["json"]:
                             event_id = int(event_id)
-                        result = await get_event_unified(storage, event_id)
+                        result = await storage.get_event(event_id)
                 elif name == "list_events":
                     if not storage:
                         result = {"error": "storage_type is required"}
                     else:
-                        result = await list_events_unified(
-                            storage=storage,
-                            max_results=args.get("max_results", 10)
+                        result = await storage.list_events(
+                            max_results=args.get("max_results")
                         )
                 elif name == "search_events":
                     if not storage:
